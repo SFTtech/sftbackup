@@ -1,0 +1,11 @@
+[Unit]
+Description=periodic sft backup
+
+[Timer]
+# please adjust the backup interval here :)
+OnCalendar=daily
+RandomizedDelaySec=1day
+Persistent=true
+
+[Install]
+WantedBy=timers.target

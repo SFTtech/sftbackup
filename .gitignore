@@ -1,0 +1,39 @@
+# editor-specific files
+\#*
+.#*
+*~
+.*.swp
+
+# ELF files
+*.o
+*.a
+*.so
+
+# python bytecode
+*.pyc
+*.pyo
+__pycache__
+*.pyd
+
+# MSVC files
+*.pdb
+*.dll
+*.exe
+
+# workflow
+*.orig
+/TODO.org
+
+# code search
+/.agignore
+/.globalrc
+/GPATH
+/GRTAGS
+/GTAGS
+
+# IDEs
+.vscode
+.idea
+
+# macOS
+.DS_Store
