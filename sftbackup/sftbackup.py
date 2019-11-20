@@ -24,37 +24,58 @@ import tempfile
 
 
 def main():
+    """
+    argparsing and entry point for sftbackup
+    """
+
     cli = argparse.ArgumentParser()
     cli.add_argument("--cfg", default="/etc/sftbackup.cfg")
     cli.add_argument("--dryrun", action="store_true")
-    cli.add_argument('--override', help='enter snapshot name e.g. to resume backup')
+    subp = cli.add_subparsers(dest="mode", required=True)
+
+    subp.add_parser("prune")
+    backupcli = subp.add_parser("backup")
+    backupcli.add_argument('--override', help='enter snapshot name e.g. to resume backup')
+
     args = cli.parse_args()
 
     cfg = configparser.ConfigParser()
     with open(args.cfg) as cfgfd:
         cfg.read_file(cfgfd)
 
-    backup(cfg, args.dryrun, args.override)
+    if args.mode == "prune":
+        prune(cfg, args.dryrun)
+
+    elif args.mode == "backup":
+        backup(cfg, args.dryrun, args.override)
+
+    else:
+        raise Exception("unknown program mode")
 
 
 def backup(cfg, dryrun, backupname_override):
-    if not cfg.has_section('backup'):
-        raise Exception("config file needs [backup] section with repo and password at least")
+    """
+    create a backup with borg
+    """
+    if not cfg.has_section('archive'):
+        raise Exception("config file needs [archive] section with repo and password at least")
 
-    borgrepo = cfg['backup']['repo']
-    password = cfg['backup']['password']
+    # general borg archive properties
+    borgrepo = cfg['archive']['repo']
+    password_cfg = cfg['archive']['password']
+
+    # settings for the backup
     compress = cfg['backup'].get('compress', 'auto,zstd,4')
     rootdir = cfg['backup'].get('rootdir', '/')
     exclude_cfg = cfg['backup'].get('exclude')
     paths_cfg = cfg['backup'].get('paths', '/')
+    prune_run_cfg = cfg['backup'].get('prune_old')
 
-    if any(password.startswith(char) for char in ('~', '/', '.')):
-        try:
-            password = os.path.expanduser(password)
-            with open(password) as pwfile:
-                password = pwfile.read().strip()
-        except FileNotFoundError:
-            print("tried to use password as file, but could not find it")
+    prune_run = False
+    if prune_run_cfg:
+        prune_run = prune_run_cfg.lower() == 'true'
+
+    password = get_password(password_cfg)
 
     excludedirs = ["home/*/.cache/*", "var/tmp/*", "tmp/*", "var/cache/*",
                    "proc/*", "sys/*", "dev/*"]
@@ -71,21 +92,11 @@ def backup(cfg, dryrun, backupname_override):
         if path:
             backuppaths.append(os.path.relpath(path, "/"))
 
-    if cfg.has_section('prune'):
-        prune_active_cfg = cfg['prune'].get('active')
-        prune_active = False
-        if prune_active_cfg:
-            prune_active = True if prune_active_cfg.lower() == 'true' else False
-
-        prune_keep_daily = int(cfg['prune'].get('keep_daily', 7))
-        prune_keep_weekly = int(cfg['prune'].get('keep_weekly', 4))
-        prune_keep_monthly = int(cfg['prune'].get('keep_monthly', 3))
-
     use_snapper = False
     if cfg.has_section('snapper'):
         use_snapper_cfg = cfg['snapper'].get('active')
         if use_snapper_cfg:
-            use_snapper = True if use_snapper_cfg.lower() == 'true' else False
+            use_snapper = use_snapper_cfg.lower() == 'true'
 
         snapperdir = cfg['snapper'].get('snapdir', '.snapshots')
 
@@ -121,19 +132,85 @@ def backup(cfg, dryrun, backupname_override):
     if backupname_override:
         backupname = backupname_override
 
-    borg_flags = ["--one-file-system",
-                  "--stats",
-                  "--exclude-caches",
-                  "--show-rc",
-                  "--checkpoint-interval", "600",
-                  "--compression", compress]  # borg help compression
+    borg_create = ["create",
+                   "--one-file-system",
+                   "--stats",
+                   "--exclude-caches",
+                   "--show-rc",
+                   "--checkpoint-interval", "600",
+                   "--compression", compress]
 
     if os.isatty(sys.stdout.fileno()):
-        borg_flags.append("--progress")
+        borg_create.append("--progress")
 
     for exclude in excludedirs:
-        borg_flags.extend(["--exclude", exclude])
+        borg_create.extend(["--exclude", exclude])
 
+    repospec = f"{borgrepo}::{backupname}"
+    borg_invocation = borg_create + [repospec] + backuppaths
+
+    launch_borg(
+        borg_invocation,
+        password,
+        workdir=backupdir,
+        dryrun=dryrun,
+    )
+
+    if prune_run:
+        prune(cfg, dryrun)
+
+
+def prune(cfg, dryrun):
+    """
+    remove old archives from a borg repo
+    """
+    if not cfg.has_section('archive'):
+        raise Exception("config file needs [archive] section with repo and password at least")
+
+    borgrepo = cfg['archive']['repo']
+    password_cfg = cfg['archive']['password']
+
+    if not cfg.has_section('prune'):
+        raise Exception("config file needs a [prune] configuration section")
+
+    prune_keep_daily = int(cfg['prune'].get('keep_daily', 7))
+    prune_keep_weekly = int(cfg['prune'].get('keep_weekly', 4))
+    prune_keep_monthly = int(cfg['prune'].get('keep_monthly', 3))
+
+    password = get_password(password_cfg)
+
+    borg_prune_invocation = ["prune",
+                             "--list",
+                             "--show-rc",
+                             "--keep-daily", str(prune_keep_daily),
+                             "--keep-weekly", str(prune_keep_weekly),
+                             "--keep-monthly", str(prune_keep_monthly),
+                             borgrepo]
+
+    launch_borg(borg_prune_invocation, password, dryrun=dryrun)
+
+
+def get_password(password):
+    """
+    try to read the password from a file, if it looks like a filename.
+    """
+    if any(password.startswith(char) for char in ('~', '/', '.')):
+        try:
+            password = os.path.expanduser(password)
+            with open(password) as pwfile:
+                password = pwfile.read().strip()
+        except FileNotFoundError:
+            print("tried to use password as file, but could not find it")
+
+    return password
+
+
+def launch_borg(args, password, workdir=None, dryrun=False):
+    """
+    launch borg and supply the password by environment
+
+    raises a CalledProcessError when borg doesn't return with 0
+    """
     with tempfile.NamedTemporaryFile() as pwfile:
         pwfile.write(password.encode())
         pwfile.flush()
@@ -143,28 +220,17 @@ def backup(cfg, dryrun, backupname_override):
             'BORG_PASSCOMMAND': f'cat {pwfilepath}',
         }
 
-        # usually, change to / or the snapper snapshot
-        print(f"$ cd {backupdir}")
-        os.chdir(backupdir)
+        if workdir:
+            # change to / or the snapper snapshot
+            print(f"$ cd {workdir}")
+            os.chdir(workdir)
 
-        repospec = f"{borgrepo}::{backupname}"
+        cmd = ["borg"] + args
 
-        borg_invocation = ["borg", "create"] + borg_flags + [repospec] + backuppaths
-        print(f"$ {' '.join(borg_invocation)}")
+        print(f"$ {' '.join(cmd)}")
 
         if not dryrun:
-            subprocess.run(borg_invocation, env=env, check=True)
-
-        if prune_active:
-            borg_prune_invocation = ["borg", "prune", "--list", "--show-rc",
-                                     "--keep-daily", str(prune_keep_daily),
-                                     "--keep-weekly", str(prune_keep_weekly),
-                                     "--keep-monthly", str(prune_keep_monthly),
-                                     borgrepo]
-
-            print(f"$ {' '.join(borg_prune_invocation)}")
-            if not dryrun:
-                subprocess.run(borg_prune_invocation, env=env, check=True)
+            subprocess.run(cmd, env=env, check=True)
 
 
 if __name__ == "__main__":
