@@ -37,13 +37,18 @@ def main():
     backupcli = subp.add_parser("backup")
     backupcli.add_argument('--override', help='enter snapshot name e.g. to resume backup')
 
+    subp.add_parser("init")
+
     args = cli.parse_args()
 
     cfg = configparser.ConfigParser()
     with open(args.cfg) as cfgfd:
         cfg.read_file(cfgfd)
 
-    if args.mode == "prune":
+    if args.mode == "init":
+        init(cfg, args.dryrun)
+
+    elif args.mode == "prune":
         prune(cfg, args.dryrun)
 
     elif args.mode == "backup":
@@ -188,6 +193,27 @@ def prune(cfg, dryrun):
                              borgrepo]
 
     launch_borg(borg_prune_invocation, password, dryrun=dryrun)
+
+
+def init(cfg, dryrun):
+    """
+    create a new borg archive in repokey mode
+
+    TODO: also add support for keyfile mode
+    """
+    if not cfg.has_section('archive'):
+        raise Exception("config file needs [archive] section with repo and password at least")
+
+    borgrepo = cfg['archive']['repo']
+    password_cfg = cfg['archive']['password']
+
+    password = get_password(password_cfg)
+
+    borg_init_invocation = ["init",
+                            "--encryption", "repokey",
+                            borgrepo]
+
+    launch_borg(borg_init_invocation, password, dryrun=dryrun)
 
 
 def get_password(password):
